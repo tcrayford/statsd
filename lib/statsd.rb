@@ -18,8 +18,8 @@ require 'json'
 #   statsd = Statsd.new('localhost').tap{|sd| sd.namespace = 'account'}
 #   statsd.increment 'activate'
 #
-# Statsd instances are thread safe for general usage, by using a thread local
-# UDPSocket and carrying no state. The attributes are stateful, and are not
+# Statsd instances are thread safe for general usage, by utilizing the thread
+# safe nature of UDP sends. The attributes are stateful, and are not
 # mutexed, it is expected that users will not change these at runtime in
 # threaded environments. If users require such use cases, it is recommend that
 # users either mutex around their Statsd object, or create separate objects for
@@ -103,21 +103,25 @@ class Statsd
     end
 
     # @attribute [w] host
-    #   Writes are not thread safe.
     def host=(host)
       @host = host || '127.0.0.1'
+      connect
     end
 
     # @attribute [w] port
-    #   Writes are not thread safe.
     def port=(port)
       @port = port || 8126
+      connect
     end
 
     # @param [String] host your statsd host
     # @param [Integer] port your statsd port
     def initialize(host = '127.0.0.1', port = 8126)
-      self.host, self.port = host, port
+      @host = host || '127.0.0.1'
+      @port = port || 8126
+      # protects @socket transactions
+      @s_mu = Mutex.new
+      connect
     end
 
     # Reads all gauges from StatsD.
@@ -154,9 +158,11 @@ class Statsd
     end
 
     def stats
-      # the format of "stats" isn't JSON, who knows why
-      send_to_socket "stats"
-      result = read_from_socket
+      result = @s_mu.synchronize do
+        # the format of "stats" isn't JSON, who knows why
+        send_to_socket "stats"
+        read_from_socket
+      end
       items = {}
       result.split("\n").each do |line|
         key, val = line.chomp.split(": ")
@@ -165,18 +171,27 @@ class Statsd
       items
     end
 
+    # Reconnects the socket, for when the statsd address may have changed.
+    def hup
+      connect
+    end
+
     private
 
     def read_metric name
-      send_to_socket name
-      result = read_from_socket
+      result = @s_mu.synchronize do
+        send_to_socket name
+        read_from_socket
+      end
       # for some reason, the reply looks like JSON, but isn't, quite
       JSON.parse result.gsub("'", "\"")
     end
 
     def delete_metric name, item
-      send_to_socket "del#{name} #{item}"
-      result = read_from_socket
+      result = @s_mu.synchronize do
+        send_to_socket "del#{name} #{item}"
+        read_from_socket
+      end
       deleted = []
       result.split("\n").each do |line|
         deleted << line.chomp.split(": ")[-1]
@@ -186,7 +201,7 @@ class Statsd
 
     def send_to_socket(message)
       self.class.logger.debug { "Statsd: #{message}" } if self.class.logger
-      socket.write(message.to_s + "\n")
+      @socket.write(message.to_s + "\n")
     rescue => boom
       self.class.logger.error { "Statsd: #{boom.class} #{boom}" } if self.class.logger
       nil
@@ -196,16 +211,16 @@ class Statsd
     def read_from_socket
       buffer = ""
       loop do
-        line = socket.readline
+        line = @socket.readline
         break if line == "END\n"
         buffer += line
       end
-      socket.readline # clear the closing newline out of the socket
+      @socket.readline # clear the closing newline out of the socket
       buffer
     end
 
-    def socket
-      Thread.current[:statsd_admin_socket] ||= TCPSocket.new(host, port)
+    def connect
+      @s_mu.synchronize { @socket = TCPSocket.new(host, port) }
     end
   end
 
@@ -235,10 +250,12 @@ class Statsd
   # @param [String] host your statsd host
   # @param [Integer] port your statsd port
   def initialize(host = '127.0.0.1', port = 8125)
-    self.host, self.port = host, port
+    @host = host || '127.0.0.1'
+    @port = port || 8125
     @prefix = nil
     @batch_size = 10
     @postfix = nil
+    connect
   end
 
   # @attribute [w] namespace
@@ -262,12 +279,14 @@ class Statsd
   #   Writes are not thread safe.
   def host=(host)
     @host = host || '127.0.0.1'
+    connect
   end
 
   # @attribute [w] port
   #   Writes are not thread safe.
   def port=(port)
     @port = port || 8125
+    connect
   end
 
   # Sends an increment (count = 1) for the given stat to the statsd server.
@@ -369,6 +388,12 @@ class Statsd
     Batch.new(self).easy &block
   end
 
+  # Reconnects the socket, useful if the address of the statsd has changed. This
+  # method is not thread safe.
+  def hup
+    connect
+  end
+
   protected
 
   def send_to_socket(message)
@@ -391,10 +416,11 @@ class Statsd
   end
 
   def socket
-    Thread.current[:statsd_socket] ||= UDPSocket.new addr_family
+    @socket || raise(ThreadError, "socket missing")
   end
 
-  def addr_family
-    Addrinfo.udp(@host, @port).afamily
+  def connect
+    @socket = UDPSocket.new Addrinfo.udp(@host, @port).afamily
+    @socket.connect host, port
   end
 end
