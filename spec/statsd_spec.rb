@@ -300,7 +300,7 @@ describe Statsd do
     before do
       require 'stringio'
       Statsd.logger = Logger.new(@log = StringIO.new)
-      @socket.instance_eval { def send(*) raise SocketError end }
+      @socket.instance_eval { def sendmsg(*) raise SocketError end }
     end
 
     it "should ignore socket errors" do
@@ -383,36 +383,52 @@ end
 describe Statsd do
   describe "with a real UDP socket" do
     it "should actually send stuff over the socket" do
-      socket = UDPSocket.new
-      host, port = 'localhost', 12345
-      socket.bind(host, port)
+      family = Addrinfo.udp(UDPSocket.getaddress('localhost'), 0).afamily
+      begin
+        socket = UDPSocket.new family
+        host, port = 'localhost', 0
+        socket.bind(host, port)
+        port = socket.addr[1]
 
-      statsd = Statsd.new(host, port)
-      statsd.increment('foobar')
-      message = socket.recvfrom(16).first
-      message.must_equal 'foobar:1|c'
+        statsd = Statsd.new(host, port)
+        statsd.increment('foobar')
+        message = socket.recvfrom(16).first
+        message.must_equal 'foobar:1|c'
+      ensure
+        socket.close
+      end
     end
 
     it "should send stuff over an IPv4 socket" do
-      socket = UDPSocket.new Socket::AF_INET
-      host, port = '127.0.0.1', 12346
-      socket.bind(host, port)
+      begin
+        socket = UDPSocket.new Socket::AF_INET
+        host, port = '127.0.0.1', 0
+        socket.bind(host, port)
+        port = socket.addr[1]
 
-      statsd = Statsd.new(host, port)
-      statsd.increment('foobar')
-      message = socket.recvfrom(16).first
-      message.must_equal 'foobar:1|c'
+        statsd = Statsd.new(host, port)
+        statsd.increment('foobar')
+        message = socket.recvfrom(16).first
+        message.must_equal 'foobar:1|c'
+      ensure
+        socket.close
+      end
     end
 
     it "should send stuff over an IPv6 socket" do
-      socket = UDPSocket.new Socket::AF_INET6
-      host, port = '::1', 12347
-      socket.bind(host, port)
+      begin
+        socket = UDPSocket.new Socket::AF_INET6
+        host, port = '::1', 0
+        socket.bind(host, port)
+        port = socket.addr[1]
 
-      statsd = Statsd.new(host, port)
-      statsd.increment('foobar')
-      message = socket.recvfrom(16).first
-      message.must_equal 'foobar:1|c'
+        statsd = Statsd.new(host, port)
+        statsd.increment('foobar')
+        message = socket.recvfrom(16).first
+        message.must_equal 'foobar:1|c'
+      ensure
+        socket.close
+      end
     end
   end
-end if ENV['LIVE']
+end
